@@ -112,6 +112,7 @@ const ProviderConfigSchema = Type.Object({
 	authHeader: Type.Optional(Type.Boolean()),
 	models: Type.Optional(Type.Array(ModelDefinitionSchema)),
 	modelOverrides: Type.Optional(Type.Record(Type.String(), ModelOverrideSchema)),
+	compat: Type.Optional(OpenAICompatSchema),
 });
 
 const ModelsConfigSchema = Type.Object({
@@ -120,11 +121,12 @@ const ModelsConfigSchema = Type.Object({
 
 type ModelsConfig = Static<typeof ModelsConfigSchema>;
 
-/** Provider override config (baseUrl, headers, apiKey) without custom models */
+/** Provider override config (baseUrl, headers, apiKey, compat) without custom models */
 interface ProviderOverride {
 	baseUrl?: string;
 	headers?: Record<string, string>;
 	apiKey?: string;
+	compat?: Model<Api>["compat"];
 }
 
 /** Result of loading custom models from models.json */
@@ -143,7 +145,7 @@ function emptyCustomModelsResult(error?: string): CustomModelsResult {
 
 function mergeCompat(
 	baseCompat: Model<Api>["compat"],
-	overrideCompat: ModelOverride["compat"],
+	overrideCompat: Model<Api>["compat"] | undefined,
 ): Model<Api>["compat"] | undefined {
 	if (!overrideCompat) return baseCompat;
 
@@ -298,13 +300,14 @@ export class ModelRegistry {
 			return models.map((m) => {
 				let model = m;
 
-				// Apply provider-level baseUrl/headers override
+				// Apply provider-level baseUrl/headers/compat override
 				if (providerOverride) {
 					const resolvedHeaders = resolveHeaders(providerOverride.headers);
 					model = {
 						...model,
 						baseUrl: providerOverride.baseUrl ?? model.baseUrl,
 						headers: resolvedHeaders ? { ...model.headers, ...resolvedHeaders } : model.headers,
+						compat: mergeCompat(model.compat, providerOverride.compat),
 					};
 				}
 
@@ -359,12 +362,13 @@ export class ModelRegistry {
 			const modelOverrides = new Map<string, Map<string, ModelOverride>>();
 
 			for (const [providerName, providerConfig] of Object.entries(config.providers)) {
-				// Apply provider-level baseUrl/headers/apiKey override to built-in models when configured.
-				if (providerConfig.baseUrl || providerConfig.headers || providerConfig.apiKey) {
+				// Apply provider-level baseUrl/headers/apiKey/compat override to built-in models when configured.
+				if (providerConfig.baseUrl || providerConfig.headers || providerConfig.apiKey || providerConfig.compat) {
 					overrides.set(providerName, {
 						baseUrl: providerConfig.baseUrl,
 						headers: providerConfig.headers,
 						apiKey: providerConfig.apiKey,
+						compat: providerConfig.compat as Model<Api>["compat"] | undefined,
 					});
 				}
 
@@ -475,7 +479,10 @@ export class ModelRegistry {
 					contextWindow: modelDef.contextWindow ?? 128000,
 					maxTokens: modelDef.maxTokens ?? 16384,
 					headers,
-					compat: modelDef.compat,
+					compat: mergeCompat(
+						providerConfig.compat as Model<Api>["compat"] | undefined,
+						modelDef.compat as Model<Api>["compat"] | undefined,
+					),
 				} as Model<Api>);
 			}
 		}
@@ -612,7 +619,7 @@ export class ModelRegistry {
 					contextWindow: modelDef.contextWindow,
 					maxTokens: modelDef.maxTokens,
 					headers,
-					compat: modelDef.compat,
+					compat: mergeCompat(config.compat, modelDef.compat),
 				} as Model<Api>);
 			}
 
@@ -623,7 +630,7 @@ export class ModelRegistry {
 					this.models = config.oauth.modifyModels(this.models, cred);
 				}
 			}
-		} else if (config.baseUrl) {
+		} else if (config.baseUrl || config.headers || config.compat) {
 			// Override-only: update baseUrl/headers for existing models
 			const resolvedHeaders = resolveHeaders(config.headers);
 			this.models = this.models.map((m) => {
@@ -632,6 +639,7 @@ export class ModelRegistry {
 					...m,
 					baseUrl: config.baseUrl ?? m.baseUrl,
 					headers: resolvedHeaders ? { ...m.headers, ...resolvedHeaders } : m.headers,
+					compat: mergeCompat(m.compat, config.compat),
 				};
 			});
 		}
@@ -645,6 +653,7 @@ export interface ProviderConfigInput {
 	baseUrl?: string;
 	apiKey?: string;
 	api?: Api;
+	compat?: Model<Api>["compat"];
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;
 	authHeader?: boolean;

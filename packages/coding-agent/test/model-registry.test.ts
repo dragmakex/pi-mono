@@ -121,6 +121,25 @@ describe("ModelRegistry", () => {
 			expect(googleModels[0].baseUrl).not.toBe("https://my-proxy.example.com/v1");
 		});
 
+		test("provider-level compat applies in override-only config", () => {
+			writeRawModelsJson({
+				anthropic: {
+					compat: {
+						supportsDeveloperRole: false,
+						thinkingFormat: "zai",
+					},
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const anthropicModels = getModelsForProvider(registry, "anthropic");
+			const compat = anthropicModels[0]?.compat as OpenAICompletionsCompat | undefined;
+
+			expect(anthropicModels.length).toBeGreaterThan(0);
+			expect(compat?.supportsDeveloperRole).toBe(false);
+			expect(compat?.thinkingFormat).toBe("zai");
+		});
+
 		test("can mix baseUrl override and models merge", () => {
 			writeRawModelsJson({
 				// baseUrl-only for anthropic
@@ -286,6 +305,80 @@ describe("ModelRegistry", () => {
 			const anthropicModels = getModelsForProvider(registry, "anthropic");
 			expect(anthropicModels.some((m) => m.id === "claude-custom")).toBe(false);
 			expect(anthropicModels.some((m) => m.id.includes("claude"))).toBe(true);
+		});
+
+		test("provider-level compat applies to custom models", () => {
+			writeRawModelsJson({
+				zai: {
+					baseUrl: "https://api.z.ai/api/coding/pass/v4",
+					apiKey: "ZAI_API_KEY",
+					api: "openai-completions",
+					compat: {
+						supportsDeveloperRole: false,
+						thinkingFormat: "zai",
+					},
+					models: [
+						{
+							id: "glm-5",
+							name: "GLM-5 (GLM Coding Plan)",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 4096,
+						},
+					],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const glm5 = getModelsForProvider(registry, "zai").find((m) => m.id === "glm-5");
+			const compat = glm5?.compat as OpenAICompletionsCompat | undefined;
+
+			expect(glm5).toBeDefined();
+			expect(glm5?.baseUrl).toBe("https://api.z.ai/api/coding/pass/v4");
+			expect(glm5?.name).toBe("GLM-5 (GLM Coding Plan)");
+			expect(glm5?.maxTokens).toBe(4096);
+			expect(compat?.supportsDeveloperRole).toBe(false);
+			expect(compat?.thinkingFormat).toBe("zai");
+		});
+
+		test("model-level compat overrides provider compat and preserves provider defaults", () => {
+			writeRawModelsJson({
+				"custom-openai": {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "CUSTOM_OPENAI_KEY",
+					api: "openai-completions",
+					compat: {
+						supportsDeveloperRole: false,
+						supportsUsageInStreaming: false,
+						thinkingFormat: "qwen",
+					},
+					models: [
+						{
+							id: "custom-model",
+							name: "Custom Model",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 4096,
+							compat: {
+								supportsDeveloperRole: true,
+							},
+						},
+					],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const customModel = getModelsForProvider(registry, "custom-openai").find((m) => m.id === "custom-model");
+			const compat = customModel?.compat as OpenAICompletionsCompat | undefined;
+
+			expect(customModel).toBeDefined();
+			expect(compat?.supportsDeveloperRole).toBe(true);
+			expect(compat?.supportsUsageInStreaming).toBe(false);
+			expect(compat?.thinkingFormat).toBe("qwen");
 		});
 	});
 
