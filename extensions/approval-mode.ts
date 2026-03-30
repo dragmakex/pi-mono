@@ -17,23 +17,91 @@ interface ApprovalModeState {
 }
 
 const STATE_ENTRY_TYPE = "approval-mode-state";
+const FOLLOW_UP_APPROVAL_WINDOW_MS = 1200;
+
+function getStringValue(input: Record<string, unknown>, keys: string[]): string | undefined {
+	for (const key of keys) {
+		const value = input[key];
+		if (typeof value === "string" && value.trim().length > 0) {
+			return value;
+		}
+	}
+	return undefined;
+}
+
+function getNumberValue(input: Record<string, unknown>, keys: string[]): number | undefined {
+	for (const key of keys) {
+		const value = input[key];
+		if (typeof value === "number" && Number.isFinite(value)) {
+			return value;
+		}
+	}
+	return undefined;
+}
+
+function getBooleanValue(input: Record<string, unknown>, keys: string[]): boolean | undefined {
+	for (const key of keys) {
+		const value = input[key];
+		if (typeof value === "boolean") {
+			return value;
+		}
+	}
+	return undefined;
+}
+
+function formatFields(fields: Array<[label: string, value: string | number | boolean | undefined]>): string {
+	const lines = fields
+		.filter(([, value]) => value !== undefined)
+		.map(([label, value]) => `${label}: ${String(value)}`);
+	return lines.length > 0 ? lines.join("\n") : "(no tool arguments)";
+}
 
 function formatToolInput(toolName: string, input: Record<string, unknown>): string {
 	if (toolName === "bash") {
-		const command = typeof input.command === "string" ? input.command : "(missing command)";
-		return `command: ${command}`;
+		return formatFields([
+			["command", getStringValue(input, ["command", "cmd"]) ?? "(missing command)"],
+			["cwd", getStringValue(input, ["cwd", "workingDirectory", "working_directory"])],
+		]);
 	}
 	if (toolName === "write") {
-		const filePath = typeof input.filePath === "string" ? input.filePath : "(missing filePath)";
-		return `filePath: ${filePath}`;
+		return formatFields([
+			["filePath", getStringValue(input, ["filePath", "file_path", "path"]) ?? "(missing filePath)"],
+			["append", getBooleanValue(input, ["append"])],
+		]);
 	}
 	if (toolName === "edit") {
-		const filePath = typeof input.filePath === "string" ? input.filePath : "(missing filePath)";
-		return `filePath: ${filePath}`;
+		return formatFields([
+			["filePath", getStringValue(input, ["filePath", "file_path", "path"]) ?? "(missing filePath)"],
+			["oldText", getStringValue(input, ["oldText", "old_text"])],
+			["newText", getStringValue(input, ["newText", "new_text"])],
+			["replaceAll", getBooleanValue(input, ["replaceAll", "replace_all"])],
+		]);
 	}
 	if (toolName === "read") {
-		const filePath = typeof input.filePath === "string" ? input.filePath : "(missing filePath)";
-		return `filePath: ${filePath}`;
+		return formatFields([
+			["filePath", getStringValue(input, ["filePath", "file_path", "path"]) ?? "(missing filePath)"],
+			["offset", getNumberValue(input, ["offset"])],
+			["limit", getNumberValue(input, ["limit"])],
+		]);
+	}
+	if (toolName === "grep") {
+		return formatFields([
+			["pattern", getStringValue(input, ["pattern"])],
+			["path", getStringValue(input, ["path", "filePath", "file_path"])],
+			["include", getStringValue(input, ["include"])],
+		]);
+	}
+	if (toolName === "find") {
+		return formatFields([
+			["path", getStringValue(input, ["path", "filePath", "file_path"])],
+			["pattern", getStringValue(input, ["pattern"])],
+		]);
+	}
+	if (toolName === "ls") {
+		return formatFields([
+			["path", getStringValue(input, ["path", "filePath", "file_path"])],
+			["depth", getNumberValue(input, ["depth"])],
+		]);
 	}
 	return JSON.stringify(input, null, 2);
 }
@@ -46,8 +114,14 @@ function modeStatusText(ctx: ExtensionContext, mode: ApprovalMode | undefined): 
 	return ctx.ui.theme.fg("warning", "approval: confirm each tool");
 }
 
+async function selectYesNo(ctx: ExtensionContext, title: string, message: string): Promise<boolean> {
+	const choice = await ctx.ui.select(`${title}\n${message}`, ["No", "Yes"]);
+	return choice === "Yes";
+}
+
 export default function approvalModeExtension(pi: ExtensionAPI): void {
 	let mode: ApprovalMode | undefined;
+	let followUpApprovalUntil = 0;
 
 	function persistMode(): void {
 		if (!mode) return;
@@ -79,7 +153,8 @@ export default function approvalModeExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const allowAll = await ctx.ui.confirm(
+		const allowAll = await selectYesNo(
+			ctx,
 			"Permission mode",
 			"Enable everything (no per-tool confirmations)?\n\nYes = allow all\nNo = ask for each tool call",
 		);
@@ -93,6 +168,17 @@ export default function approvalModeExtension(pi: ExtensionAPI): void {
 		return event.input as Record<string, unknown>;
 	}
 
+	function shouldAutoApproveFollowUp(): boolean {
+		const now = Date.now();
+		if (followUpApprovalUntil <= now) return false;
+		followUpApprovalUntil = 0;
+		return true;
+	}
+
+	function armFollowUpApproval(): void {
+		followUpApprovalUntil = Date.now() + FOLLOW_UP_APPROVAL_WINDOW_MS;
+	}
+
 	pi.registerCommand("approval-mode", {
 		description: "Switch between allow-all and approve-all tool permissions",
 		handler: async (_args, ctx) => {
@@ -101,7 +187,8 @@ export default function approvalModeExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
-			const allowAll = await ctx.ui.confirm(
+			const allowAll = await selectYesNo(
+				ctx,
 				"Permission mode",
 				"Enable everything (no per-tool confirmations)?\n\nYes = allow all\nNo = ask for each tool call",
 			);
@@ -145,8 +232,13 @@ export default function approvalModeExtension(pi: ExtensionAPI): void {
 			return { block: true, reason: "Tool call blocked (approve-all mode requires interactive confirmation)" };
 		}
 
+		if (shouldAutoApproveFollowUp()) {
+			return undefined;
+		}
+
 		const input = getEventInput(event);
-		const confirmed = await ctx.ui.confirm(
+		const confirmed = await selectYesNo(
+			ctx,
 			"Approve tool call?",
 			`Tool: ${event.toolName}\n${formatToolInput(event.toolName, input)}`,
 		);
@@ -155,6 +247,7 @@ export default function approvalModeExtension(pi: ExtensionAPI): void {
 			return { block: true, reason: `Blocked by user (tool: ${event.toolName})` };
 		}
 
+		armFollowUpApproval();
 		return undefined;
 	});
 }

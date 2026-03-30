@@ -1,0 +1,3 @@
+[submodule "extensions/pi-playwright-extension"]
+	path = extensions/pi-playwright-extension
+	url = https://github.com/SamuelLHuber/pi-playwright-extension
