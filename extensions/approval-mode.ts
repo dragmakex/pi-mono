@@ -114,9 +114,19 @@ function modeStatusText(ctx: ExtensionContext, mode: ApprovalMode | undefined): 
 	return ctx.ui.theme.fg("warning", "approval: confirm each tool");
 }
 
-async function selectYesNo(ctx: ExtensionContext, title: string, message: string): Promise<boolean> {
-	const choice = await ctx.ui.select(`${title}\n${message}`, ["No", "Yes"]);
+async function selectYesNo(
+	ctx: ExtensionContext,
+	title: string,
+	message: string,
+	defaultChoice: "yes" | "no" = "no",
+): Promise<boolean> {
+	const options = defaultChoice === "yes" ? ["Yes", "No"] : ["No", "Yes"];
+	const choice = await ctx.ui.select(`${title}\n${message}`, options);
 	return choice === "Yes";
+}
+
+function getToolApprovalDefault(_toolName: string): "yes" | "no" {
+	return "yes";
 }
 
 export default function approvalModeExtension(pi: ExtensionAPI): void {
@@ -241,6 +251,7 @@ export default function approvalModeExtension(pi: ExtensionAPI): void {
 			ctx,
 			"Approve tool call?",
 			`Tool: ${event.toolName}\n${formatToolInput(event.toolName, input)}`,
+			getToolApprovalDefault(event.toolName),
 		);
 
 		if (!confirmed) {
