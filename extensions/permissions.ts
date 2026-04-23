@@ -1,22 +1,22 @@
 /**
- * Approval Mode Extension
+ * Permissions Extension
  *
  * Presents one startup choice:
- * - "Enable everything": allow all tool calls
- * - "Approve everything": require confirmation for every tool call
+ * - "Ask": require confirmation for every tool call
+ * - "Allow all": allow all tool calls
  *
  * State is persisted in session custom entries and restored on reload/tree navigation.
  */
 
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@mariozechner/pi-coding-agent";
 
-type ApprovalMode = "allow-all" | "approve-all";
+type PermissionMode = "allow-all" | "approve-all";
 
-interface ApprovalModeState {
-	mode: ApprovalMode;
+interface PermissionModeState {
+	mode: PermissionMode;
 }
 
-const STATE_ENTRY_TYPE = "approval-mode-state";
+const STATE_ENTRY_TYPE = "permissions-state";
 const FOLLOW_UP_APPROVAL_WINDOW_MS = 1200;
 
 function getStringValue(input: Record<string, unknown>, keys: string[]): string | undefined {
@@ -106,54 +106,44 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
 	return JSON.stringify(input, null, 2);
 }
 
-function modeStatusText(ctx: ExtensionContext, mode: ApprovalMode | undefined): string | undefined {
+function modeStatusText(ctx: ExtensionContext, mode: PermissionMode | undefined): string | undefined {
 	if (!mode) return undefined;
 	if (mode === "allow-all") {
-		return ctx.ui.theme.fg("dim", "approval: allow all");
+		return ctx.ui.theme.fg("dim", "permissions: allow all");
 	}
-	return ctx.ui.theme.fg("warning", "approval: confirm each tool");
+	return ctx.ui.theme.fg("warning", "permissions: ask");
 }
 
-async function selectYesNo(
-	ctx: ExtensionContext,
-	title: string,
-	message: string,
-	defaultChoice: "yes" | "no" = "no",
-): Promise<boolean> {
-	const options = defaultChoice === "yes" ? ["Yes", "No"] : ["No", "Yes"];
-	const choice = await ctx.ui.select(`${title}\n${message}`, options);
-	return choice === "Yes";
+async function selectPermissionMode(ctx: ExtensionContext): Promise<PermissionMode> {
+	const choice = await ctx.ui.select("Permission mode", ["Ask", "Allow all"]);
+	return choice === "Allow all" ? "allow-all" : "approve-all";
 }
 
-function getToolApprovalDefault(_toolName: string): "yes" | "no" {
-	return "yes";
-}
-
-export default function approvalModeExtension(pi: ExtensionAPI): void {
-	let mode: ApprovalMode | undefined;
+export default function permissionsExtension(pi: ExtensionAPI): void {
+	let mode: PermissionMode | undefined;
 	let followUpApprovalUntil = 0;
 
 	function persistMode(): void {
 		if (!mode) return;
-		pi.appendEntry<ApprovalModeState>(STATE_ENTRY_TYPE, { mode });
+		pi.appendEntry<PermissionModeState>(STATE_ENTRY_TYPE, { mode });
 	}
 
 	function restoreModeFromBranch(ctx: ExtensionContext): void {
-		let restored: ApprovalMode | undefined;
+		let restored: PermissionMode | undefined;
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== STATE_ENTRY_TYPE) continue;
-			const data = entry.data as ApprovalModeState | undefined;
+			const data = entry.data as PermissionModeState | undefined;
 			if (data?.mode === "allow-all" || data?.mode === "approve-all") {
 				restored = data.mode;
 			}
 		}
 		mode = restored ?? mode;
-		ctx.ui.setStatus("approval-mode", modeStatusText(ctx, mode));
+		ctx.ui.setStatus("permissions", modeStatusText(ctx, mode));
 	}
 
 	async function ensureModeSelected(ctx: ExtensionContext): Promise<void> {
 		if (mode) {
-			ctx.ui.setStatus("approval-mode", modeStatusText(ctx, mode));
+			ctx.ui.setStatus("permissions", modeStatusText(ctx, mode));
 			return;
 		}
 
@@ -163,15 +153,9 @@ export default function approvalModeExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const allowAll = await selectYesNo(
-			ctx,
-			"Permission mode",
-			"Enable everything (no per-tool confirmations)?\n\nYes = allow all\nNo = ask for each tool call",
-		);
-
-		mode = allowAll ? "allow-all" : "approve-all";
+		mode = await selectPermissionMode(ctx);
 		persistMode();
-		ctx.ui.setStatus("approval-mode", modeStatusText(ctx, mode));
+		ctx.ui.setStatus("permissions", modeStatusText(ctx, mode));
 	}
 
 	function getEventInput(event: ToolCallEvent): Record<string, unknown> {
@@ -189,22 +173,17 @@ export default function approvalModeExtension(pi: ExtensionAPI): void {
 		followUpApprovalUntil = Date.now() + FOLLOW_UP_APPROVAL_WINDOW_MS;
 	}
 
-	pi.registerCommand("approval-mode", {
-		description: "Switch between allow-all and approve-all tool permissions",
+	pi.registerCommand("permissions", {
+		description: "Switch between Ask and Allow all tool permissions",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("No interactive UI available", "warning");
 				return;
 			}
 
-			const allowAll = await selectYesNo(
-				ctx,
-				"Permission mode",
-				"Enable everything (no per-tool confirmations)?\n\nYes = allow all\nNo = ask for each tool call",
-			);
-			mode = allowAll ? "allow-all" : "approve-all";
+			mode = await selectPermissionMode(ctx);
 			persistMode();
-			ctx.ui.setStatus("approval-mode", modeStatusText(ctx, mode));
+			ctx.ui.setStatus("permissions", modeStatusText(ctx, mode));
 			ctx.ui.notify(`Permission mode set to ${mode}`, "info");
 		},
 	});
@@ -212,7 +191,7 @@ export default function approvalModeExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		restoreModeFromBranch(ctx);
 		if (mode) {
-			ctx.ui.setStatus("approval-mode", modeStatusText(ctx, mode));
+			ctx.ui.setStatus("permissions", modeStatusText(ctx, mode));
 		}
 	});
 
@@ -247,11 +226,9 @@ export default function approvalModeExtension(pi: ExtensionAPI): void {
 		}
 
 		const input = getEventInput(event);
-		const confirmed = await selectYesNo(
-			ctx,
-			"Approve tool call?",
-			`Tool: ${event.toolName}\n${formatToolInput(event.toolName, input)}`,
-			getToolApprovalDefault(event.toolName),
+		const confirmed = await ctx.ui.confirm(
+			`Approve tool call?\nTool: ${event.toolName}\n${formatToolInput(event.toolName, input)}`,
+			true,
 		);
 
 		if (!confirmed) {
