@@ -4,13 +4,16 @@
  * Presents one startup choice:
  * - "Ask": require confirmation for every tool call
  * - "Allow all": allow all tool calls
+ * - "Sandboxing": allow supported built-in tools inside the current folder only
  *
  * State is persisted in session custom entries and restored on reload/tree navigation.
  */
 
+import { homedir } from "node:os";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@mariozechner/pi-coding-agent";
 
-type PermissionMode = "allow-all" | "approve-all";
+type PermissionMode = "allow-all" | "approve-all" | "sandboxing";
 
 interface PermissionModeState {
 	mode: PermissionMode;
@@ -18,6 +21,7 @@ interface PermissionModeState {
 
 const STATE_ENTRY_TYPE = "permissions-state";
 const FOLLOW_UP_APPROVAL_WINDOW_MS = 1200;
+const NONINTERACTIVE_MODE_ENV = "PI_PERMISSIONS_NONINTERACTIVE";
 
 function getStringValue(input: Record<string, unknown>, keys: string[]): string | undefined {
 	for (const key of keys) {
@@ -111,12 +115,107 @@ function modeStatusText(ctx: ExtensionContext, mode: PermissionMode | undefined)
 	if (mode === "allow-all") {
 		return ctx.ui.theme.fg("dim", "permissions: allow all");
 	}
+	if (mode === "sandboxing") {
+		return ctx.ui.theme.fg("success", "permissions: sandboxing");
+	}
 	return ctx.ui.theme.fg("warning", "permissions: ask");
 }
 
 async function selectPermissionMode(ctx: ExtensionContext): Promise<PermissionMode> {
-	const choice = await ctx.ui.select("Permission mode", ["Ask", "Allow all"]);
-	return choice === "Allow all" ? "allow-all" : "approve-all";
+	const choice = await ctx.ui.select("Permission mode", ["Ask", "Allow all", "Sandboxing"]);
+	if (choice === "Allow all") return "allow-all";
+	if (choice === "Sandboxing") return "sandboxing";
+	return "approve-all";
+}
+
+function parsePermissionMode(value: string | undefined): PermissionMode | undefined {
+	if (!value) return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "allow-all" || normalized === "allow" || normalized === "1" || normalized === "true") {
+		return "allow-all";
+	}
+	if (normalized === "approve-all" || normalized === "ask" || normalized === "0" || normalized === "false") {
+		return "approve-all";
+	}
+	if (normalized === "sandboxing" || normalized === "sandbox") {
+		return "sandboxing";
+	}
+	return undefined;
+}
+
+function expandUserPath(path: string): string {
+	if (path === "~") return homedir();
+	if (path.startsWith("~/")) return `${homedir()}${path.slice(1)}`;
+	return path;
+}
+
+function resolveSandboxPath(path: string, cwd: string): string {
+	const expanded = expandUserPath(path);
+	return isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
+}
+
+function isInsideSandbox(path: string, cwd: string): boolean {
+	const root = resolve(cwd);
+	const target = resolveSandboxPath(path, root);
+	const rel = relative(root, target);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function getSandboxToolPaths(toolName: string, input: Record<string, unknown>): Array<[label: string, path: string]> {
+	if (toolName === "read" || toolName === "write" || toolName === "edit") {
+		const path = getStringValue(input, ["filePath", "file_path", "path"]);
+		return path ? [["path", path]] : [];
+	}
+	if (toolName === "grep" || toolName === "find" || toolName === "ls") {
+		return [["path", getStringValue(input, ["path", "filePath", "file_path"]) ?? "."]];
+	}
+	if (toolName === "bash") {
+		const cwd = getStringValue(input, ["cwd", "workingDirectory", "working_directory"]);
+		return cwd ? [["cwd", cwd]] : [];
+	}
+	return [];
+}
+
+function getBashSandboxViolation(command: string, cwd: string): string | undefined {
+	const cdPattern = /(?:^|[;&|]\s*)cd\s+([^;&|\n]+)/g;
+	for (const match of command.matchAll(cdPattern)) {
+		const rawTarget = match[1]?.trim().replace(/^['"]|['"]$/g, "");
+		if (rawTarget && !isInsideSandbox(rawTarget, cwd)) {
+			return `bash changes directory outside sandbox: ${rawTarget}`;
+		}
+	}
+	if (/(^|[\s"'=])\.\.\//.test(command)) {
+		return "bash command references a parent-directory path";
+	}
+	if (/(^|[\s"'=])~(?:\/|\s|$)/.test(command)) {
+		return "bash command references a home-directory path";
+	}
+	if (/(^|[\s"'=])\/(?!\/)/.test(command)) {
+		return "bash command references an absolute path";
+	}
+	return undefined;
+}
+
+function getSandboxViolation(event: ToolCallEvent, ctx: ExtensionContext): string | undefined {
+	const supportedTools = new Set(["bash", "read", "write", "edit", "grep", "find", "ls"]);
+	if (!supportedTools.has(event.toolName)) {
+		return `tool is not supported in sandboxing mode: ${event.toolName}`;
+	}
+
+	const input = event.input as Record<string, unknown>;
+	for (const [label, path] of getSandboxToolPaths(event.toolName, input)) {
+		if (!isInsideSandbox(path, ctx.cwd)) {
+			return `${event.toolName} ${label} is outside sandbox: ${path}`;
+		}
+	}
+
+	if (event.toolName === "bash") {
+		const command = getStringValue(input, ["command", "cmd"]);
+		if (!command) return "bash command is missing";
+		return getBashSandboxViolation(command, ctx.cwd);
+	}
+
+	return undefined;
 }
 
 export default function permissionsExtension(pi: ExtensionAPI): void {
@@ -133,7 +232,7 @@ export default function permissionsExtension(pi: ExtensionAPI): void {
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== STATE_ENTRY_TYPE) continue;
 			const data = entry.data as PermissionModeState | undefined;
-			if (data?.mode === "allow-all" || data?.mode === "approve-all") {
+			if (data?.mode === "allow-all" || data?.mode === "approve-all" || data?.mode === "sandboxing") {
 				restored = data.mode;
 			}
 		}
@@ -148,7 +247,7 @@ export default function permissionsExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!ctx.hasUI) {
-			mode = "approve-all";
+			mode = parsePermissionMode(process.env[NONINTERACTIVE_MODE_ENV]) ?? "approve-all";
 			persistMode();
 			return;
 		}
@@ -174,7 +273,7 @@ export default function permissionsExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("permissions", {
-		description: "Switch between Ask and Allow all tool permissions",
+		description: "Switch between Ask, Allow all, and Sandboxing tool permissions",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("No interactive UI available", "warning");
@@ -213,6 +312,14 @@ export default function permissionsExtension(pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event, ctx) => {
 		if (!mode) {
 			await ensureModeSelected(ctx);
+		}
+
+		if (mode === "sandboxing") {
+			const violation = getSandboxViolation(event, ctx);
+			if (violation) {
+				return { block: true, reason: `Blocked by sandboxing mode: ${violation}` };
+			}
+			return undefined;
 		}
 
 		if (mode !== "approve-all") return undefined;
