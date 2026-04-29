@@ -247,7 +247,7 @@ export default function permissionsExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!ctx.hasUI) {
-			mode = parsePermissionMode(process.env[NONINTERACTIVE_MODE_ENV]) ?? "approve-all";
+			mode = parsePermissionMode(process.env[NONINTERACTIVE_MODE_ENV]) ?? "sandboxing";
 			persistMode();
 			return;
 		}
