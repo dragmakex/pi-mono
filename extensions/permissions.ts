@@ -4,7 +4,7 @@
  * Presents one startup choice:
  * - "Ask": require confirmation for every tool call
  * - "Allow all": allow all tool calls
- * - "Sandboxing": allow supported built-in tools inside the current folder only
+ * - "Sandboxing": allow all tools, but restrict file system access to the current folder
  *
  * State is persisted in session custom entries and restored on reload/tree navigation.
  */
@@ -184,24 +184,31 @@ function getBashSandboxViolation(command: string, cwd: string): string | undefin
 			return `bash changes directory outside sandbox: ${rawTarget}`;
 		}
 	}
-	if (/(^|[\s"'=])\.\.\//.test(command)) {
-		return "bash command references a parent-directory path";
+
+	const pathPattern = /(^|[\s"'=])((?:\.\.\/)+|~(?:\/|$)|\/(?!\/))([^\s"'`;|&)]*)/g;
+	for (const match of command.matchAll(pathPattern)) {
+		const prefix = match[2] ?? "";
+		const suffix = match[3] ?? "";
+		const rawPath = `${prefix}${suffix}`.replace(/[.,:;]+$/g, "");
+		if (!rawPath || rawPath === "/") continue;
+		if (!isInsideSandbox(rawPath, cwd)) {
+			if (rawPath.startsWith("../")) {
+				return `bash references a parent-directory path outside sandbox: ${rawPath}`;
+			}
+			if (rawPath === "~" || rawPath.startsWith("~/")) {
+				return `bash references a home-directory path outside sandbox: ${rawPath}`;
+			}
+			if (rawPath.startsWith("/")) {
+				return `bash references an absolute path outside sandbox: ${rawPath}`;
+			}
+			return `bash references a path outside sandbox: ${rawPath}`;
+		}
 	}
-	if (/(^|[\s"'=])~(?:\/|\s|$)/.test(command)) {
-		return "bash command references a home-directory path";
-	}
-	if (/(^|[\s"'=])\/(?!\/)/.test(command)) {
-		return "bash command references an absolute path";
-	}
+
 	return undefined;
 }
 
 function getSandboxViolation(event: ToolCallEvent, ctx: ExtensionContext): string | undefined {
-	const supportedTools = new Set(["bash", "read", "write", "edit", "grep", "find", "ls"]);
-	if (!supportedTools.has(event.toolName)) {
-		return `tool is not supported in sandboxing mode: ${event.toolName}`;
-	}
-
 	const input = event.input as Record<string, unknown>;
 	for (const [label, path] of getSandboxToolPaths(event.toolName, input)) {
 		if (!isInsideSandbox(path, ctx.cwd)) {
