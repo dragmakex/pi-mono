@@ -15,10 +15,12 @@ function getTerminalBundleId(): string | undefined {
 			return "com.googlecode.iterm2";
 		case "WezTerm":
 			return "com.github.wez.wezterm";
+		case "ghostty":
+			return "com.mitchellh.ghostty";
 		case "vscode":
 			return "com.microsoft.VSCode";
 		default:
-			return undefined;
+			return process.env.TERM === "xterm-ghostty" ? "com.mitchellh.ghostty" : undefined;
 	}
 }
 
