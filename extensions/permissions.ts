@@ -3,8 +3,8 @@
  *
  * Presents one startup choice:
  * - "Ask": require confirmation for every tool call
- * - "Allow all": allow all tool calls
  * - "Sandboxing": allow all tools, but restrict file system access to the current folder
+ * - "Allow all": allow all tool calls
  *
  * State is persisted in session custom entries and restored on reload/tree navigation.
  */
@@ -122,9 +122,9 @@ function modeStatusText(ctx: ExtensionContext, mode: PermissionMode | undefined)
 }
 
 async function selectPermissionMode(ctx: ExtensionContext): Promise<PermissionMode> {
-	const choice = await ctx.ui.select("Permission mode", ["Ask", "Allow all", "Sandboxing"]);
-	if (choice === "Allow all") return "allow-all";
+	const choice = await ctx.ui.select("Permission mode", ["Ask", "Sandboxing", "Allow all"]);
 	if (choice === "Sandboxing") return "sandboxing";
+	if (choice === "Allow all") return "allow-all";
 	return "approve-all";
 }
 
@@ -280,7 +280,7 @@ export default function permissionsExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("permissions", {
-		description: "Switch between Ask, Allow all, and Sandboxing tool permissions",
+		description: "Switch between Ask, Sandboxing, and Allow all tool permissions",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("No interactive UI available", "warning");

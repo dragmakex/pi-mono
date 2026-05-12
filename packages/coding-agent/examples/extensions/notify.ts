@@ -1,16 +1,62 @@
 /**
  * Pi Notify Extension
  *
- * Sends a native terminal notification when Pi agent is done and waiting for input.
- * Supports multiple terminal protocols:
- * - OSC 777: Ghostty, iTerm2, WezTerm, rxvt-unicode
- * - OSC 99: Kitty
- * - Windows toast: Windows Terminal (WSL)
+ * Sends a terminal-native notification when Pi is done and waiting for input.
+ * Only emits OSC sequences for terminals that explicitly support them.
+ * Unsupported terminals are ignored instead of receiving raw escape codes.
  */
 
+import { execFile } from "node:child_process";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
+const ESC = "\x1b";
+const BEL = "\x07";
+const ST = `${ESC}\\`;
+
+type NotificationTerminal = "ghostty" | "iterm2" | "kitty" | "windows-terminal";
+
+function sanitizeOscText(text: string): string {
+	return text
+		.replace(/[\x07\x1b\x9c\r\n]+/g, " ")
+		.replaceAll(";", ":")
+		.trim();
+}
+
+function wrapForMultiplexer(sequence: string): string {
+	if (process.env.TMUX) {
+		return `${ESC}Ptmux;${sequence.replaceAll(ESC, `${ESC}${ESC}`)}${ST}`;
+	}
+	if (process.env.STY) {
+		return `${ESC}P${sequence}${ST}`;
+	}
+	return sequence;
+}
+
+function detectTerminal(): NotificationTerminal | null {
+	if (process.env.WT_SESSION) {
+		return "windows-terminal";
+	}
+
+	const termProgram = process.env.TERM_PROGRAM?.toLowerCase();
+	const lcTerminal = process.env.LC_TERMINAL?.toLowerCase();
+	const term = process.env.TERM?.toLowerCase();
+
+	if (term === "xterm-ghostty" || termProgram === "ghostty") {
+		return "ghostty";
+	}
+	if (process.env.ITERM_SESSION_ID || lcTerminal === "iterm2" || termProgram === "iterm.app") {
+		return "iterm2";
+	}
+	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty" || term?.includes("kitty")) {
+		return "kitty";
+	}
+
+	return null;
+}
+
 function windowsToastScript(title: string, body: string): string {
+	const escapedTitle = title.replaceAll("'", "''");
+	const escapedBody = body.replaceAll("'", "''");
 	const type = "Windows.UI.Notifications";
 	const mgr = `[${type}.ToastNotificationManager, ${type}, ContentType = WindowsRuntime]`;
 	const template = `[${type}.ToastTemplateType]::ToastText01`;
@@ -18,33 +64,60 @@ function windowsToastScript(title: string, body: string): string {
 	return [
 		`${mgr} > $null`,
 		`$xml = [${type}.ToastNotificationManager]::GetTemplateContent(${template})`,
-		`$xml.GetElementsByTagName('text')[0].AppendChild($xml.CreateTextNode('${body}')) > $null`,
-		`[${type}.ToastNotificationManager]::CreateToastNotifier('${title}').Show(${toast})`,
+		`$xml.GetElementsByTagName('text')[0].AppendChild($xml.CreateTextNode('${escapedBody}')) > $null`,
+		`[${type}.ToastNotificationManager]::CreateToastNotifier('${escapedTitle}').Show(${toast})`,
 	].join("; ");
 }
 
 function notifyOSC777(title: string, body: string): void {
-	process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);
+	const safeTitle = sanitizeOscText(title);
+	const safeBody = sanitizeOscText(body);
+	process.stdout.write(wrapForMultiplexer(`${ESC}]777;notify;${safeTitle};${safeBody}${BEL}`));
+}
+
+function notifyOSC9(title: string, body: string): void {
+	const safeTitle = sanitizeOscText(title);
+	const safeBody = sanitizeOscText(body);
+	const display = safeTitle ? `${safeTitle}: ${safeBody}` : safeBody;
+	process.stdout.write(wrapForMultiplexer(`${ESC}]9;${display}${BEL}`));
 }
 
 function notifyOSC99(title: string, body: string): void {
-	// Kitty OSC 99: i=notification id, d=0 means not done yet, p=body for second part
-	process.stdout.write(`\x1b]99;i=1:d=0;${title}\x1b\\`);
-	process.stdout.write(`\x1b]99;i=1:p=body;${body}\x1b\\`);
+	const safeTitle = sanitizeOscText(title);
+	const safeBody = sanitizeOscText(body);
+	const id = Math.floor(Math.random() * 10000);
+	process.stdout.write(wrapForMultiplexer(`${ESC}]99;i=${id}:d=0:p=title;${safeTitle}${ST}`));
+	process.stdout.write(wrapForMultiplexer(`${ESC}]99;i=${id}:p=body;${safeBody}${ST}`));
+	process.stdout.write(wrapForMultiplexer(`${ESC}]99;i=${id}:d=1:a=focus;${ST}`));
 }
 
 function notifyWindows(title: string, body: string): void {
-	const { execFile } = require("child_process");
-	execFile("powershell.exe", ["-NoProfile", "-Command", windowsToastScript(title, body)]);
+	execFile("powershell.exe", ["-NoProfile", "-Command", windowsToastScript(title, body)], () => {
+		// Ignore notification errors.
+	});
 }
 
 function notify(title: string, body: string): void {
-	if (process.env.WT_SESSION) {
-		notifyWindows(title, body);
-	} else if (process.env.KITTY_WINDOW_ID) {
-		notifyOSC99(title, body);
-	} else {
-		notifyOSC777(title, body);
+	if (!process.stdout.isTTY) {
+		return;
+	}
+
+	const terminal = detectTerminal();
+	switch (terminal) {
+		case "windows-terminal":
+			notifyWindows(title, body);
+			break;
+		case "kitty":
+			notifyOSC99(title, body);
+			break;
+		case "iterm2":
+			notifyOSC9(title, body);
+			break;
+		case "ghostty":
+			notifyOSC777(title, body);
+			break;
+		default:
+			break;
 	}
 }
 
