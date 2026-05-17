@@ -10,7 +10,7 @@
  */
 
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@mariozechner/pi-coding-agent";
 
 type PermissionMode = "allow-all" | "approve-all" | "sandboxing";
@@ -154,11 +154,46 @@ function resolveSandboxPath(path: string, cwd: string): string {
 	return isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
 }
 
-function isInsideSandbox(path: string, cwd: string): boolean {
-	const root = resolve(cwd);
-	const target = resolveSandboxPath(path, root);
+function isPathInsideRoot(target: string, root: string): boolean {
 	const rel = relative(root, target);
 	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function isInsideSandbox(path: string, cwd: string, allowedRoots: string[] = []): boolean {
+	const root = resolve(cwd);
+	const target = resolveSandboxPath(path, root);
+	if (isPathInsideRoot(target, root)) {
+		return true;
+	}
+	return allowedRoots.some((allowedRoot) => isPathInsideRoot(target, allowedRoot));
+}
+
+function decodeXmlEntities(value: string): string {
+	return value
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
+		.replace(/&amp;/g, "&");
+}
+
+function getSkillSandboxRoots(systemPrompt: string): string[] {
+	const roots: string[] = [];
+	const seen = new Set<string>();
+	const locationPattern = /<location>([\s\S]*?)<\/location>/g;
+	for (const match of systemPrompt.matchAll(locationPattern)) {
+		const encodedLocation = match[1]?.trim();
+		if (!encodedLocation) {
+			continue;
+		}
+		const root = resolve(dirname(decodeXmlEntities(encodedLocation)));
+		if (seen.has(root)) {
+			continue;
+		}
+		seen.add(root);
+		roots.push(root);
+	}
+	return roots;
 }
 
 function getSandboxToolPaths(toolName: string, input: Record<string, unknown>): Array<[label: string, path: string]> {
@@ -176,11 +211,11 @@ function getSandboxToolPaths(toolName: string, input: Record<string, unknown>): 
 	return [];
 }
 
-function getBashSandboxViolation(command: string, cwd: string): string | undefined {
+function getBashSandboxViolation(command: string, cwd: string, allowedRoots: string[]): string | undefined {
 	const cdPattern = /(?:^|[;&|]\s*)cd\s+([^;&|\n]+)/g;
 	for (const match of command.matchAll(cdPattern)) {
 		const rawTarget = match[1]?.trim().replace(/^['"]|['"]$/g, "");
-		if (rawTarget && !isInsideSandbox(rawTarget, cwd)) {
+		if (rawTarget && !isInsideSandbox(rawTarget, cwd, allowedRoots)) {
 			return `bash changes directory outside sandbox: ${rawTarget}`;
 		}
 	}
@@ -191,7 +226,7 @@ function getBashSandboxViolation(command: string, cwd: string): string | undefin
 		const suffix = match[3] ?? "";
 		const rawPath = `${prefix}${suffix}`.replace(/[.,:;]+$/g, "");
 		if (!rawPath || rawPath === "/") continue;
-		if (!isInsideSandbox(rawPath, cwd)) {
+		if (!isInsideSandbox(rawPath, cwd, allowedRoots)) {
 			if (rawPath.startsWith("../")) {
 				return `bash references a parent-directory path outside sandbox: ${rawPath}`;
 			}
@@ -210,8 +245,9 @@ function getBashSandboxViolation(command: string, cwd: string): string | undefin
 
 function getSandboxViolation(event: ToolCallEvent, ctx: ExtensionContext): string | undefined {
 	const input = event.input as Record<string, unknown>;
+	const skillSandboxRoots = getSkillSandboxRoots(ctx.getSystemPrompt());
 	for (const [label, path] of getSandboxToolPaths(event.toolName, input)) {
-		if (!isInsideSandbox(path, ctx.cwd)) {
+		if (!isInsideSandbox(path, ctx.cwd, skillSandboxRoots)) {
 			return `${event.toolName} ${label} is outside sandbox: ${path}`;
 		}
 	}
@@ -219,7 +255,7 @@ function getSandboxViolation(event: ToolCallEvent, ctx: ExtensionContext): strin
 	if (event.toolName === "bash") {
 		const command = getStringValue(input, ["command", "cmd"]);
 		if (!command) return "bash command is missing";
-		return getBashSandboxViolation(command, ctx.cwd);
+		return getBashSandboxViolation(command, ctx.cwd, skillSandboxRoots);
 	}
 
 	return undefined;
